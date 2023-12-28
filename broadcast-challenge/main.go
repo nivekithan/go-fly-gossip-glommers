@@ -3,9 +3,16 @@ package main
 import (
 	"encoding/json"
 	"log"
+	"time"
 
 	maelstrom "github.com/jepsen-io/maelstrom/demo/go"
 )
+
+type clientBroadcastMessage struct {
+	Type    string `json:"type"`
+	Message int    `json:"message"`
+	FromId  string `json:"fromId"`
+}
 
 func main() {
 	node := maelstrom.NewNode()
@@ -36,12 +43,6 @@ func main() {
 		return node.Reply(msg, response_body)
 	})
 
-	type clientBroadcastMessage struct {
-		Type    string `json:"type"`
-		Message int    `json:"message"`
-		FromId  string `json:"fromId"`
-	}
-
 	node.Handle("broadcast", func(msg maelstrom.Message) error {
 		type boardcastMessage struct {
 			Type    string `json:"type"`
@@ -56,25 +57,13 @@ func main() {
 
 		node_msg = append(node_msg, body.Message)
 
-		go func(message int) {
-			for _, clientId := range node.NodeIDs() {
-				if clientId == node.ID() {
-					// If the clientId is same as localId. Don't broadcast the message to ourselves
-					continue
-				}
-
-				if err := node.Send(
-					clientId,
-					clientBroadcastMessage{
-						Type:    "client_broadcast_message",
-						Message: message,
-						FromId:  node.ID(),
-					},
-				); err != nil {
-					panic(err)
-				}
+		for _, clientId := range node.NodeIDs() {
+			if clientId == node.ID() {
+				continue
 			}
-		}(body.Message)
+
+			go broadcastToOtherNodes(node, body.Message, clientId)
+		}
 
 		return node.Reply(msg, map[string]any{"type": "broadcast_ok"})
 	})
@@ -93,11 +82,39 @@ func main() {
 
 		node_msg = append(node_msg, body.Message)
 
-		return nil
+		return node.Reply(msg, map[string]any{"type": "client_broadcast_message_ok"})
 	})
 
 	if err := node.Run(); err != nil {
 		log.Fatal(err)
 	}
 
+}
+func broadcastToOtherNodes(node *maelstrom.Node, message int, clientId string) {
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+
+	resChan := make(chan bool)
+	if err := node.RPC(
+		clientId,
+		clientBroadcastMessage{
+			Type:    "client_broadcast_message",
+			Message: message,
+			FromId:  node.ID(),
+		},
+		func(msg maelstrom.Message) error {
+			resChan <- true
+			return nil
+		},
+	); err != nil {
+		panic(err)
+	}
+
+	select {
+	case <-ticker.C:
+		broadcastToOtherNodes(node, message, clientId)
+
+	case <-resChan:
+		return
+	}
 }
